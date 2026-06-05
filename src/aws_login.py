@@ -52,7 +52,14 @@ DEFAULT_START_URL = os.environ.get(
     "https://example.awsapps.com/start/",
 )
 DEFAULT_SSO_REGION = os.environ.get("AWS_SSO_REGION_DEFAULT", "us-east-1")
-DEFAULT_DEFAULT_REGION = os.environ.get("AWS_REGION_DEFAULT", "us-east-1")
+DEFAULT_DEFAULT_REGION = os.environ.get("AWS_REGION_DEFAULT", "us-east-2")
+
+# Sections whose region must always be locked to a specific value regardless
+# of what the caller passes.
+_SECTION_REGION_LOCK: dict[str, str] = {
+    "sso-session catdigital": "us-east-1",
+}
+_DEFAULT_CONFIG_REGION = "us-east-2"
 SSO_CACHE_DIR = Path.home() / ".aws" / "sso" / "cache"
 AWS_CREDENTIALS_PATH = Path.home() / ".aws" / "credentials"
 AWS_CONFIG_PATH = Path.home() / ".aws" / "config"
@@ -327,6 +334,23 @@ def _get_role_credentials(sso, token: str,
 # --------------------------------------------------------------------------- #
 # ~/.aws/{credentials,config} writer
 # --------------------------------------------------------------------------- #
+def _enforce_region_rules(section: str, values: dict[str, str]) -> dict[str, str]:
+    """
+    Apply region locking rules before writing any section to ~/.aws/config:
+
+    - ``[sso-session catdigital]`` → region must always be ``us-east-1``
+    - All other sections            → region must always be ``us-east-2``
+    """
+    if "region" not in values:
+        return values
+    locked = dict(values)
+    if section in _SECTION_REGION_LOCK:
+        locked["region"] = _SECTION_REGION_LOCK[section]
+    else:
+        locked["region"] = _DEFAULT_CONFIG_REGION
+    return locked
+
+
 def _upsert_ini(path: Path, section: str, values: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     cp = configparser.RawConfigParser()
@@ -336,8 +360,26 @@ def _upsert_ini(path: Path, section: str, values: dict[str, str]) -> None:
     if cp.has_section(section):
         cp.remove_section(section)
     cp.add_section(section)
-    for k, v in values.items():
+
+    # Enforce region rules: us-east-2 for all sections except
+    # [sso-session catdigital] which must always stay us-east-1.
+    enforced_values = _enforce_region_rules(section, values)
+
+    for k, v in enforced_values.items():
         cp.set(section, k, v)
+
+    # Also fix up any already-present sections in the file so stale region
+    # values are corrected whenever the file is touched.
+    for existing_section in cp.sections():
+        if existing_section == section:
+            continue  # already handled above
+        if cp.has_option(existing_section, "region"):
+            if existing_section in _SECTION_REGION_LOCK:
+                cp.set(existing_section, "region",
+                       _SECTION_REGION_LOCK[existing_section])
+            else:
+                cp.set(existing_section, "region", _DEFAULT_CONFIG_REGION)
+
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as fh:
         cp.write(fh)
