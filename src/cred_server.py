@@ -21,6 +21,7 @@ process on this machine as able to read the credentials it returns.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import logging
 import os
@@ -223,6 +224,22 @@ def _post_tokens(env_name: str, creds: dict, client_id: str) -> Any:
         return raw
 
 
+def _jwt_exp(token: str) -> Optional[datetime]:
+    """Read exp from a JWT payload without verifying the signature."""
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return None
+        padded = parts[1] + "=" * (-len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+        exp = payload.get("exp")
+        if exp is None:
+            return None
+        return datetime.fromtimestamp(float(exp), tz=timezone.utc)
+    except (ValueError, json.JSONDecodeError, OSError):
+        return None
+
+
 def get_token(env_name: str, refresh: bool = False) -> dict:
     client_id = os.environ.get(CLIENT_ID_ENV, "").strip()
     if not client_id:
@@ -251,28 +268,9 @@ def get_token(env_name: str, refresh: bool = False) -> dict:
             f"token API response for env={env_name} did not contain a token field"
         )
 
-    # Prefer token-specific expiry from the API body when present; otherwise
-    # fall back to the underlying AWS credential expiry as a safe upper bound.
-    expires_at = creds["_expires_at"]
-    if isinstance(api_body, dict):
-        for key in ("expiration", "expiresAt", "expires_at", "exp"):
-            raw_exp = api_body.get(key)
-            if isinstance(raw_exp, (int, float)):
-                # seconds or ms since epoch
-                ts = float(raw_exp)
-                if ts > 1e12:
-                    ts /= 1000.0
-                expires_at = datetime.fromtimestamp(ts, tz=timezone.utc)
-                break
-            if isinstance(raw_exp, str) and raw_exp:
-                try:
-                    exp_s = raw_exp[:-1] + "+00:00" if raw_exp.endswith("Z") else raw_exp
-                    expires_at = datetime.fromisoformat(exp_s)
-                    if expires_at.tzinfo is None:
-                        expires_at = expires_at.replace(tzinfo=timezone.utc)
-                    break
-                except ValueError:
-                    pass
+    # JWT exp is authoritative (~1h). Do not use AWS credential expiry as the
+    # cache TTL — that kept serving expired entitlement JWTs for hours.
+    expires_at = _jwt_exp(token) or (now + timedelta(minutes=55))
 
     payload = {
         "env": env_name,

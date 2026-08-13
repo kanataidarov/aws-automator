@@ -177,26 +177,24 @@ Flags: `--host` (default `127.0.0.1`), `--port` (default `8765`), `-v`.
 
 ```javascript
 const url = `http://127.0.0.1:8765/credentials?env=${bru.getEnvVar("env")}`;
-const expiry = Date.parse(bru.getEnvVar("aws_creds_expiry") || 0);
 
-if (expiry - Date.now() > 5 * 60 * 1000) {
-  console.log("AWS credentials still valid until", bru.getEnvVar("aws_creds_expiry"));
-} else {
-  const res = await bru.sendRequest({ method: "GET", url });
-  if (res.status !== 200) {
-    const detail = res.data?.detail || res.statusText || res.status;
-    throw new Error(`credential server failed: ${detail}`);
-  }
-
-  const c = res.data;
-  bru.setEnvVar("aws_access_key_id", c.accessKeyId);
-  bru.setEnvVar("aws_secret_access_key", c.secretAccessKey);
-  bru.setEnvVar("aws_session_token", c.sessionToken);
-  bru.setEnvVar("aws_region", c.region);
-  bru.setEnvVar("aws_service", c.service);
-  bru.setEnvVar("aws_creds_expiry", c.expiration);
-  console.log(`AWS credentials refreshed for ${c.env} (${c.accountId}/${c.roleName})`);
+const res = await bru.sendRequest({ method: "GET", url });
+if (res.status !== 200) {
+  const detail = res.data?.detail || res.statusText || res.status;
+  throw new Error(`credential server failed: ${detail}`);
 }
+
+const c = res.data;
+
+bru.setEnvVar("aws_access_key_id", c.accessKeyId);
+bru.setEnvVar("aws_secret_access_key", c.secretAccessKey);
+bru.setEnvVar("aws_session_token", c.sessionToken);
+bru.setEnvVar("aws_region", c.region);
+bru.setEnvVar("aws_service", c.service);
+
+console.log(
+  `AWS credentials refreshed for ${c.env} (${c.accountId}/${c.roleName}) secretLen=${c.secretAccessKey.length}`
+);
 ```
 
 3. Request → **Auth** → type **AWS Sig V4** (or inherit from collection/folder).
@@ -211,11 +209,11 @@ if (expiry - Date.now() > 5 * 60 * 1000) {
 | Region | `{{aws_region}}` |
 | AWS CLI Profile Name | *(leave empty)* |
 
-4. Send the request. On first run (or after expiry) the console should show
-   something like `AWS credentials refreshed for dev (...)`. Auth then signs
-   with the updated env vars.
+4. Send the request. The console should show
+   `AWS credentials refreshed for dev (...)`. Auth then signs with the
+   updated env vars.
 
-Variables written by the script:
+Variables written by the script (fetched on every request):
 
 | Variable | Source field from `/credentials` |
 |----------|-----------------------------------|
@@ -224,10 +222,6 @@ Variables written by the script:
 | `aws_session_token` | `sessionToken` |
 | `aws_region` | `region` |
 | `aws_service` | `service` |
-| `aws_creds_expiry` | `expiration` |
-
-If credentials look stale, clear `aws_creds_expiry` in the Bruno environment
-(or call `...?refresh=true`) so the next request re-fetches.
 
 ### 4. Postman setup
 
@@ -237,25 +231,23 @@ Collection → **Pre-request Script**:
 
 ```javascript
 const url = `http://127.0.0.1:8765/credentials?env=${pm.environment.get("env")}`;
-const expiry = Date.parse(pm.environment.get("aws_creds_expiry") || 0);
 
-if (expiry - Date.now() > 5 * 60 * 1000) {
-    console.log("AWS credentials still valid until", pm.environment.get("aws_creds_expiry"));
-} else {
-    pm.sendRequest(url, (err, res) => {
-        if (err) { throw new Error(`credential server unreachable: ${err}`); }
-        if (res.code !== 200) { throw new Error(res.json().detail); }
+pm.sendRequest(url, (err, res) => {
+    if (err) { throw new Error(`credential server unreachable: ${err}`); }
+    if (res.code !== 200) { throw new Error(res.json().detail); }
 
-        const c = res.json();
-        pm.environment.set("aws_access_key_id", c.accessKeyId);
-        pm.environment.set("aws_secret_access_key", c.secretAccessKey);
-        pm.environment.set("aws_session_token", c.sessionToken);
-        pm.environment.set("aws_region", c.region);
-        pm.environment.set("aws_service", c.service);
-        pm.environment.set("aws_creds_expiry", c.expiration);
-        console.log(`AWS credentials refreshed for ${c.env} (${c.accountId}/${c.roleName})`);
-    });
-}
+    const c = res.json();
+
+    pm.environment.set("aws_access_key_id", c.accessKeyId);
+    pm.environment.set("aws_secret_access_key", c.secretAccessKey);
+    pm.environment.set("aws_session_token", c.sessionToken);
+    pm.environment.set("aws_region", c.region);
+    pm.environment.set("aws_service", c.service);
+
+    console.log(
+        `AWS credentials refreshed for ${c.env} (${c.accountId}/${c.roleName}) secretLen=${c.secretAccessKey.length}`
+    );
+});
 ```
 
 Collection → **Authorization** → type **AWS Signature**:
