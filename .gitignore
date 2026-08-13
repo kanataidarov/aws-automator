@@ -167,3 +167,6 @@ cython_debug/
 
 # Local, user-specific SSO setup notes (organisation identifiers).
 SETUP.md
+
+# Local dev/int/prod account mapping for the credential server.
+environments.json

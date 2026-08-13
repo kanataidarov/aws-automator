@@ -414,25 +414,35 @@ def _write_aws_files(profile: str, creds: dict, region: str) -> None:
 # --------------------------------------------------------------------------- #
 # Orchestrator
 # --------------------------------------------------------------------------- #
+def fetch_credentials(cfg: Config) -> dict:
+    """
+    Mint temporary credentials for ``cfg.account`` / ``cfg.role`` without
+    touching ~/.aws. Returns the ``_get_role_credentials`` payload plus
+    ``account_id`` and ``role_name``.
+    """
+    token = _load_cached_token(cfg.start_url, cfg.sso_region, cfg.sso_session)
+    sso = boto3.client("sso", region_name=cfg.sso_region)
+
+    account_id = _resolve_account_id(sso, token, cfg.account)
+    role_name = _resolve_role(sso, token, account_id, cfg.role)
+    log.info("Resolved %s -> %s / %s", cfg.account, account_id, role_name)
+
+    creds = _get_role_credentials(sso, token, account_id, role_name)
+    return {**creds, "account_id": account_id, "role_name": role_name}
+
+
 class AwsLogin:
     def __init__(self, cfg: Config):
         self.cfg = cfg
 
     def run(self) -> str:
         cfg = self.cfg
-        token = _load_cached_token(cfg.start_url, cfg.sso_region,
-                                   cfg.sso_session)
-        sso = boto3.client("sso", region_name=cfg.sso_region)
-
-        account_id = _resolve_account_id(sso, token, cfg.account)
-        role_name = _resolve_role(sso, token, account_id, cfg.role)
-        log.info("Resolved %s -> %s / %s", cfg.account, account_id, role_name)
-
-        creds = _get_role_credentials(sso, token, account_id, role_name)
+        creds = fetch_credentials(cfg)
         profile = cfg.profile or "default"
         _write_aws_files(profile, creds, cfg.region)
         print(f"OK: wrote profile [{profile}] "
-              f"(account {account_id}, role {role_name}, region {cfg.region})")
+              f"(account {creds['account_id']}, role {creds['role_name']}, "
+              f"region {cfg.region})")
         return profile
 
 

@@ -1,0 +1,29 @@
+{
+  "dev": {
+    "account": "my-dev-account",
+    "role": "DeveloperAccess",
+    "region": "us-east-2",
+    "service": "execute-api",
+    "sso_region": "us-east-1",
+    "sso_session": "catdigital",
+    "start_url": "https://example.awsapps.com/start/"
+  },
+  "int": {
+    "account": "my-int-account",
+    "role": "DeveloperAccess",
+    "region": "us-east-2",
+    "service": "execute-api",
+    "sso_region": "us-east-1",
+    "sso_session": "catdigital",
+    "start_url": "https://example.awsapps.com/start/"
+  },
+  "prod": {
+    "account": "my-prod-account",
+    "role": "Reader",
+    "region": "us-east-2",
+    "service": "execute-api",
+    "sso_region": "us-east-1",
+    "sso_session": "catdigital",
+    "start_url": "https://example.awsapps.com/start/"
+  }
+}

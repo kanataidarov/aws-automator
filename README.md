@@ -107,5 +107,180 @@ ERROR: ... Run: aws sso login --sso-session <name>
 
 run that command once and retry.
 
+## Bruno / Postman integration
+
+A small localhost server hands temporary SSO credentials to Bruno or Postman
+so the **AWS Sig V4** auth block fills itself instead of being pasted by hand.
+
+Flow:
+
+1. You start `python -m src.cred_server`.
+2. A pre-request script calls `GET /credentials?env=...`.
+3. The script writes `aws_*` environment variables.
+4. Auth references those variables (`{{aws_access_key_id}}`, etc.) and signs
+   the request.
+
+The script does **not** type into the Auth form fields directly. Put variable
+placeholders in Auth; the script only updates the env vars those placeholders
+resolve to.
+
+### 1. Map your environments
+
+```powershell
+Copy-Item environments.example.json environments.json
+```
+
+```bash
+cp environments.example.json environments.json
+```
+
+Edit `environments.json` (gitignored) so `dev`, `int` and `prod` point at your
+real account names, roles, regions and SigV4 `service` (e.g. `execute-api`).
+Only `account` is mandatory; the other keys fall back to defaults
+(`service` defaults to `execute-api`).
+
+### 2. Start the server
+
+```powershell
+python -m src.cred_server            # http://127.0.0.1:8765
+```
+
+Smoke-test without Bruno/Postman:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8765/healthz
+Invoke-RestMethod "http://127.0.0.1:8765/credentials?env=dev" |
+  Select-Object env, accountId, roleName, region, service, expiration
+```
+
+| Endpoint                          | Returns                                            |
+|-----------------------------------|----------------------------------------------------|
+| `GET /healthz`                    | `{"status":"ok","environments":[...]}`             |
+| `GET /credentials?env=dev`        | access key / secret / session token / region / service / expiry |
+| `GET /credentials?env=dev&refresh=true` | same, bypassing the in-memory cache          |
+
+Credentials are cached in memory per environment and re-minted 5 minutes
+before they expire, so clients do not hit AWS on every request. The server
+never writes `~/.aws/credentials` - use `python -m src.aws_login` for that.
+
+Flags: `--host` (default `127.0.0.1`), `--port` (default `8765`), `-v`.
+
+### 3. Bruno setup
+
+1. Create a Bruno environment (e.g. `dev`) and set:
+
+   | Variable | Value |
+   |----------|-------|
+   | `env` | `dev` (or `int` / `prod`) |
+
+2. Collection / folder / request → **Script** → **Pre Request**:
+
+```javascript
+const url = `http://127.0.0.1:8765/credentials?env=${bru.getEnvVar("env")}`;
+const expiry = Date.parse(bru.getEnvVar("aws_creds_expiry") || 0);
+
+if (expiry - Date.now() > 5 * 60 * 1000) {
+  console.log("AWS credentials still valid until", bru.getEnvVar("aws_creds_expiry"));
+} else {
+  const res = await bru.sendRequest({ method: "GET", url });
+  if (res.status !== 200) {
+    const detail = res.data?.detail || res.statusText || res.status;
+    throw new Error(`credential server failed: ${detail}`);
+  }
+
+  const c = res.data;
+  bru.setEnvVar("aws_access_key_id", c.accessKeyId);
+  bru.setEnvVar("aws_secret_access_key", c.secretAccessKey);
+  bru.setEnvVar("aws_session_token", c.sessionToken);
+  bru.setEnvVar("aws_region", c.region);
+  bru.setEnvVar("aws_service", c.service);
+  bru.setEnvVar("aws_creds_expiry", c.expiration);
+  console.log(`AWS credentials refreshed for ${c.env} (${c.accountId}/${c.roleName})`);
+}
+```
+
+3. Request → **Auth** → type **AWS Sig V4** (or inherit from collection/folder).
+   Do **not** paste raw keys. Use placeholders:
+
+| Field | Value |
+|-------|-------|
+| Access Key ID | `{{aws_access_key_id}}` |
+| Secret Access Key | `{{aws_secret_access_key}}` |
+| Session Token | `{{aws_session_token}}` |
+| Service | `{{aws_service}}` |
+| Region | `{{aws_region}}` |
+| AWS CLI Profile Name | *(leave empty)* |
+
+4. Send the request. On first run (or after expiry) the console should show
+   something like `AWS credentials refreshed for dev (...)`. Auth then signs
+   with the updated env vars.
+
+Variables written by the script:
+
+| Variable | Source field from `/credentials` |
+|----------|-----------------------------------|
+| `aws_access_key_id` | `accessKeyId` |
+| `aws_secret_access_key` | `secretAccessKey` |
+| `aws_session_token` | `sessionToken` |
+| `aws_region` | `region` |
+| `aws_service` | `service` |
+| `aws_creds_expiry` | `expiration` |
+
+If credentials look stale, clear `aws_creds_expiry` in the Bruno environment
+(or call `...?refresh=true`) so the next request re-fetches.
+
+### 4. Postman setup
+
+Each Postman environment needs **`env`** = `dev` / `int` / `prod`.
+
+Collection → **Pre-request Script**:
+
+```javascript
+const url = `http://127.0.0.1:8765/credentials?env=${pm.environment.get("env")}`;
+const expiry = Date.parse(pm.environment.get("aws_creds_expiry") || 0);
+
+if (expiry - Date.now() > 5 * 60 * 1000) {
+    console.log("AWS credentials still valid until", pm.environment.get("aws_creds_expiry"));
+} else {
+    pm.sendRequest(url, (err, res) => {
+        if (err) { throw new Error(`credential server unreachable: ${err}`); }
+        if (res.code !== 200) { throw new Error(res.json().detail); }
+
+        const c = res.json();
+        pm.environment.set("aws_access_key_id", c.accessKeyId);
+        pm.environment.set("aws_secret_access_key", c.secretAccessKey);
+        pm.environment.set("aws_session_token", c.sessionToken);
+        pm.environment.set("aws_region", c.region);
+        pm.environment.set("aws_service", c.service);
+        pm.environment.set("aws_creds_expiry", c.expiration);
+        console.log(`AWS credentials refreshed for ${c.env} (${c.accountId}/${c.roleName})`);
+    });
+}
+```
+
+Collection → **Authorization** → type **AWS Signature**:
+
+| Field | Value |
+|-------|-------|
+| AccessKey | `{{aws_access_key_id}}` |
+| SecretKey | `{{aws_secret_access_key}}` |
+| Session Token | `{{aws_session_token}}` |
+| AWS Region | `{{aws_region}}` |
+| Service Name | `{{aws_service}}` |
+
+Auth variables are resolved *after* the pre-request script runs, so the first
+request already signs correctly.
+
+### Notes
+
+- Bruno desktop reaches `127.0.0.1` normally. Postman needs the **desktop app**
+  (or Desktop Agent); Postman Web cannot reach localhost.
+- Prefer collection/folder-level Auth + Pre Request so every request inherits
+  them. Request-level **No Auth** overrides collection Auth.
+- The server has no authentication and is bound to loopback only. Any process
+  or web page on this machine can read credentials from that port while it is
+  running, so stop it when you are done.
+- Do not commit Bruno/Postman env files that contain live `aws_*` secrets.
+
 
 
