@@ -173,18 +173,30 @@ Flags: `--host` (default `127.0.0.1`), `--port` (default `8765`), `-v`.
    |----------|-------|
    | `env` | `dev` (or `int` / `prod`) |
 
-2. Collection / folder / request → **Script** → **Pre Request**:
+2. Collection / folder / request → **Script** → **Pre Request**
+   (not Post-response — use `result` from `bru.sendRequest`, never the main
+   request’s `res`):
 
 ```javascript
-const url = `http://127.0.0.1:8765/credentials?env=${bru.getEnvVar("env")}`;
+const env = bru.getEnvVar("env"); // must be "int" for INT APIs
+const url = `http://127.0.0.1:8765/credentials?env=${env}&refresh=true`;
 
-const res = await bru.sendRequest({ method: "GET", url });
-if (res.status !== 200) {
-  const detail = res.data?.detail || res.statusText || res.status;
+const result = await bru.sendRequest({ method: "GET", url });
+if (result.status !== 200) {
+  const detail = result.data?.detail || result.statusText || result.status;
   throw new Error(`credential server failed: ${detail}`);
 }
 
-const c = res.data;
+const c = result.data;
+if (!c?.accessKeyId || !c?.secretAccessKey || !c?.sessionToken) {
+  throw new Error("credential server returned incomplete credentials");
+}
+
+bru.setVar("aws_access_key_id", c.accessKeyId);
+bru.setVar("aws_secret_access_key", c.secretAccessKey);
+bru.setVar("aws_session_token", c.sessionToken);
+bru.setVar("aws_region", c.region);
+bru.setVar("aws_service", c.service);
 
 bru.setEnvVar("aws_access_key_id", c.accessKeyId);
 bru.setEnvVar("aws_secret_access_key", c.secretAccessKey);
@@ -193,7 +205,7 @@ bru.setEnvVar("aws_region", c.region);
 bru.setEnvVar("aws_service", c.service);
 
 console.log(
-  `AWS credentials refreshed for ${c.env} (${c.accountId}/${c.roleName}) secretLen=${c.secretAccessKey.length}`
+  `AWS credentials refreshed for ${c.env} (${c.accountId}/${c.roleName}) key=${c.accessKeyId}`
 );
 ```
 
@@ -210,10 +222,12 @@ console.log(
 | AWS CLI Profile Name | *(leave empty)* |
 
 4. Send the request. The console should show
-   `AWS credentials refreshed for dev (...)`. Auth then signs with the
-   updated env vars.
+   `AWS credentials refreshed for int (...)` (or `dev` / `prod`). Auth then
+   signs with the updated vars. If the first send after an env switch still
+   uses old keys, send once more (Bruno Sig V4 can lag one request behind
+   `setEnvVar`).
 
-Variables written by the script (fetched on every request):
+Variables written by the script (fetched on every request with `refresh=true`):
 
 | Variable | Source field from `/credentials` |
 |----------|-----------------------------------|
@@ -230,13 +244,29 @@ Each Postman environment needs **`env`** = `dev` / `int` / `prod`.
 Collection → **Pre-request Script**:
 
 ```javascript
-const url = `http://127.0.0.1:8765/credentials?env=${pm.environment.get("env")}`;
+const env = pm.environment.get("env"); // must be "int" for INT APIs
+const url = `http://127.0.0.1:8765/credentials?env=${env}&refresh=true`;
 
-pm.sendRequest(url, (err, res) => {
-    if (err) { throw new Error(`credential server unreachable: ${err}`); }
-    if (res.code !== 200) { throw new Error(res.json().detail); }
+pm.sendRequest({ method: "GET", url }, (err, result) => {
+    if (err) {
+        throw new Error(`credential server unreachable: ${err}`);
+    }
+    if (result.code !== 200) {
+        const body = result.json() || {};
+        const detail = body.detail || result.status || result.code;
+        throw new Error(`credential server failed: ${detail}`);
+    }
 
-    const c = res.json();
+    const c = result.json();
+    if (!c?.accessKeyId || !c?.secretAccessKey || !c?.sessionToken) {
+        throw new Error("credential server returned incomplete credentials");
+    }
+
+    pm.variables.set("aws_access_key_id", c.accessKeyId);
+    pm.variables.set("aws_secret_access_key", c.secretAccessKey);
+    pm.variables.set("aws_session_token", c.sessionToken);
+    pm.variables.set("aws_region", c.region);
+    pm.variables.set("aws_service", c.service);
 
     pm.environment.set("aws_access_key_id", c.accessKeyId);
     pm.environment.set("aws_secret_access_key", c.secretAccessKey);
@@ -245,7 +275,7 @@ pm.sendRequest(url, (err, res) => {
     pm.environment.set("aws_service", c.service);
 
     console.log(
-        `AWS credentials refreshed for ${c.env} (${c.accountId}/${c.roleName}) secretLen=${c.secretAccessKey.length}`
+        `AWS credentials refreshed for ${c.env} (${c.accountId}/${c.roleName}) key=${c.accessKeyId}`
     );
 });
 ```
